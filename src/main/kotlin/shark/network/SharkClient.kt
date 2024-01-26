@@ -2,13 +2,17 @@ package shark.network
 
 import com.neovisionaries.ws.client.WebSocketFactory
 import dev.minn.jda.ktx.jdabuilder.light
+import kotlinx.coroutines.runBlocking
 import net.dv8tion.jda.api.JDA
+import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.requests.GatewayIntent
+import net.dv8tion.jda.api.requests.restaction.CommandListUpdateAction
 import okhttp3.OkHttpClient
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.stereotype.Component
+import shark.network.command.MetaCommand
 import shark.network.command.SharkCommandBeanPostProcessor
 import shark.util.ConfigType
 import shark.util.SharkConfig
@@ -61,7 +65,13 @@ class SharkClient {
             enableIntents(listOf(*GatewayIntent.values()))
             addEventListeners(context.getBean(SharkClientEventListener::class.java))
         }
+        client.updateCommands().also(::updateCommands).queue()
         client.awaitReady()
+    }
+
+    fun updateCommands(action: CommandListUpdateAction) {
+        val commands = mutableListOf(*commandBeanPostProcessor.getCommands().map { it.getCommand() }.toTypedArray())
+        action.addCommands(commands)
     }
 
 }
@@ -71,5 +81,9 @@ class SharkClientEventListener : ListenerAdapter() {
 
     @Autowired
     private lateinit var client: SharkClient
+
+    override fun onSlashCommandInteraction(event: SlashCommandInteractionEvent): Unit = runBlocking {
+        MetaCommand[event.name].getAction().run(event)
+    }
 
 }

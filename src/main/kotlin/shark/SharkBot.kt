@@ -5,10 +5,12 @@ import org.springframework.boot.SpringApplication
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.builder.SpringApplicationBuilder
 import org.springframework.context.ConfigurableApplicationContext
+import org.springframework.data.mongodb.repository.config.EnableMongoRepositories
 import shark.network.SharkClient
 import java.nio.file.Path
 
-@SpringBootApplication
+@SpringBootApplication(scanBasePackages = ["shark", "sharkbot"])
+@EnableMongoRepositories(value = ["shark", "sharkbot"])
 class SharkBotApplication {
 
     @Autowired

@@ -50,6 +50,7 @@ class ResourceLocation private constructor(val namespace: String, val path: Stri
         return 31 * namespace.hashCode() + path.hashCode()
     }
 
+    fun <T> format(formatter: (namespace: String, path: String) -> T) = formatter(namespace, path)
     fun toLanguageKey() = "$namespace.$path"
     fun toLanguageKey(type: String) = type + "." + this.toLanguageKey()
     fun toLanguageKey(type: String, attribute: String) = type + "." + this.toLanguageKey() + "." + attribute

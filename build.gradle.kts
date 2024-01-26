@@ -56,6 +56,7 @@ dependencies {
     implementation("club.minnced:jda-ktx:0.11.0-beta.20")
     implementation("org.jsoup:jsoup:1.15.4")
     implementation("com.github.StarWorldTeam:Kodash:e59f24f863")
+    implementation("com.microsoft.playwright:playwright:1.41.0")
 }
 
 
