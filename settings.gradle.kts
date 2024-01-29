@@ -5,4 +5,4 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-rootProject.name = "SharkBot-2"
+rootProject.name = "SharkBot"

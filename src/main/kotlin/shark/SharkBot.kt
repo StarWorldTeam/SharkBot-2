@@ -25,7 +25,6 @@ import shark.util.ResourceUtil
 import shark.util.SharkConfig
 import java.io.PrintStream
 import java.nio.file.Path
-import kotlin.system.exitProcess
 
 @SpringBootApplication(scanBasePackages = ["shark", "sharkbot"])
 @EnableMongoRepositories(value = ["shark", "sharkbot"])
@@ -120,8 +119,6 @@ class SharkBanner : Banner {
     }
 
 }
-
-fun exit() = Unit.apply { exitProcess(0) }
 
 suspend fun main(args: Array<String>) {
     SharkBot.application = SharkBot.applicationBuilder.build()
