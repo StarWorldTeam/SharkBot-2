@@ -75,7 +75,6 @@ tasks.withType<Test> {
 configure<PublishingExtension> {
     publications.create<MavenPublication>("maven") {
         from(components.getByName("kotlin"))
-        artifact(tasks.bootJar)
     }
 }
 
