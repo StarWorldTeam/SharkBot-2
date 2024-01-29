@@ -138,5 +138,7 @@ suspend fun main(args: Array<String>) {
             }
         }
     }
-    SharkBot.getContext().getBean(SharkClient::class.java).start()
+    runCatching {
+        SharkBot.getContext().getBean(SharkClient::class.java).start()
+    }
 }

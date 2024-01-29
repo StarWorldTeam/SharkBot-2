@@ -1,22 +1,80 @@
 package shark.core.plugin
 
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import org.springframework.beans.factory.InitializingBean
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.config.BeanDefinitionHolder
+import org.springframework.beans.factory.getBean
+import org.springframework.beans.factory.support.BeanDefinitionBuilder
+import org.springframework.beans.factory.support.DefaultListableBeanFactory
 import org.springframework.context.ApplicationContext
+import org.springframework.context.annotation.ClassPathBeanDefinitionScanner
+import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.stereotype.Component
 import org.springframework.stereotype.Service
 import shark.SharkBotEnvironment
+import shark.core.event.EventBus
 import shark.core.resource.ResourceLoader
 import java.io.File
+import java.net.URLClassLoader
+
+
+class ClassLoaderBeanDefinitionScanner(private val classLoader: ClassLoader, private val beanFactory: DefaultListableBeanFactory) : ClassPathBeanDefinitionScanner(beanFactory) {
+
+    companion object {
+        fun generateBeanName(className: String) = "shark.plugin.bean.${className}"
+    }
+
+    init {
+        resourceLoader = DefaultResourceLoader(classLoader)
+    }
+
+    override fun doScan(vararg basePackages: String?): Set<BeanDefinitionHolder> {
+        val beanDefinitions: MutableSet<BeanDefinitionHolder> = LinkedHashSet()
+        for (basePackage in basePackages) {
+            val candidates = findCandidateComponents(basePackage!!)
+            for (candidate in candidates) {
+                val clazz = classLoader.loadClass(candidate.beanClassName)
+                val beanName = generateBeanName(clazz.name)
+                val beanDefinition = BeanDefinitionBuilder.genericBeanDefinition(clazz).rawBeanDefinition
+                beanFactory.registerBeanDefinition(beanName, beanDefinition)
+            }
+        }
+        return beanDefinitions
+    }
+
+}
 
 @Service
 class SharkLanguageProvider : LanguageProvider {
 
-    override fun loadPlugin(file: File): Plugin {
-        return object : Plugin {}
+    @Autowired
+    private lateinit var beanFactory: DefaultListableBeanFactory
+
+    fun scanBeans(loader: ClassLoader) {
+        val scanner = ClassLoaderBeanDefinitionScanner(loader, beanFactory)
+        scanner.scan(*loader.definedPackages.map { it.name }.toTypedArray())
     }
 
-    override fun isPluginSupported(plugin: File): Boolean {
+    override fun loadPlugin(file: File, eventBus: EventBus): Plugin? {
+        val classLoader = URLClassLoader(arrayOf(file.toURI().toURL()), ClassLoader.getSystemClassLoader())
+        val stream = classLoader.getResourceAsStream("META-INF/plugin.yml") ?: return null
+        val info = YAMLMapper().readValue<DefaultSharkPluginInfo>(stream)
+        val mainClass = classLoader.loadClass(info.getMainClass())
+        if (!mainClass.isAnnotationPresent(SharkPlugin::class.java)) return null
+        scanBeans(classLoader)
+        val plugin = beanFactory.getBean<Plugin>(ClassLoaderBeanDefinitionScanner.generateBeanName(mainClass.name))
+        val event = PluginLoadingEvent(plugin, this, info, file)
+        plugin.pluginLoadingEvent = event
+        plugin.initialize()
+        plugin.getPluginLoadingEvent()
+        eventBus.emit(event)
+        return plugin
+    }
+
+    override fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean {
         return plugin.isFile && plugin.endsWith(".jar")
     }
 
@@ -38,26 +96,57 @@ class PluginLoader : InitializingBean {
         it.mkdirs()
     }
 
-    private val plugins: MutableMap<LanguageProvider, MutableList<Pair<File, Plugin>>> = mutableMapOf()
+    private val plugins: MutableMap<String, Pair<LanguageProvider, Plugin>> = mutableMapOf()
     fun getPlugins() = plugins
+
+    private val eventBus = EventBus(this::class)
+    fun getEventBus() = eventBus
 
     override fun afterPropertiesSet() {
         resourceLoader.loadAssets()
-        plugins.getOrPut(provider, ::mutableListOf).addAll(
-            pluginDirectory.listFiles().map {
-                it to provider.loadPlugin(it)
-            }
+        plugins.putAll(
+            pluginDirectory.listFiles()
+                .map { it.path to (provider to provider.loadPlugin(it, getEventBus())) }
+                .filter { it.second.second != null }
+                .map { it.first to (it.second.first to it.second.second!!) }
         )
         for (file in pluginDirectory.listFiles()) {
+            if (file.path in plugins) continue
             for (provider in context.getBeansOfType(LanguageProvider::class.java)) {
                 if (provider == this.provider) continue
-                if (provider.value.isPluginSupported(file)) {
-                    val plugin = provider.value.loadPlugin(file)
+                if (provider.value.isPluginSupported(file, getEventBus())) {
+                    val plugin = provider.value.loadPlugin(file, getEventBus())
                     if (plugin != null)
-                        plugins.getOrPut(provider.value, ::mutableListOf).add(file to plugin)
+                        plugins[file.path] = provider.value to plugin
                 }
             }
         }
     }
+
+}
+
+interface SharkPluginInfo {
+
+    fun getName(): String
+    fun getVersion(): String
+    fun getDescription(): Array<String>
+    fun getAuthors(): Array<String>
+    fun getMainClass(): String
+
+}
+
+class DefaultSharkPluginInfo: SharkPluginInfo {
+
+    private lateinit var name: String
+    private lateinit var version: String
+    private lateinit var description: Array<String>
+    @JsonProperty("main") private lateinit var mainClass: String
+    @JsonProperty("author") private lateinit var authors: Array<String>
+
+    override fun getAuthors() = authors
+    override fun getName() = name
+    override fun getVersion() = version
+    override fun getDescription() = description
+    override fun getMainClass(): String = mainClass
 
 }
