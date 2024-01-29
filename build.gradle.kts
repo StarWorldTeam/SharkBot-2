@@ -75,6 +75,8 @@ tasks.withType<Test> {
 configure<PublishingExtension> {
     publications.create<MavenPublication>("maven") {
         from(components.getByName("kotlin"))
+        artifact(tasks.named("bootJar"))
+        artifact(tasks.kotlinSourcesJar)
     }
 }
 
@@ -98,4 +100,12 @@ tasks.dokkaHtml {
     pluginConfiguration<org.jetbrains.dokka.base.DokkaBase, org.jetbrains.dokka.base.DokkaBaseConfiguration> {
         footerMessage = "Copyright © StarWorld Team"
     }
+}
+
+tasks.bootJar {
+    archiveClassifier.set("boot")
+}
+
+tasks.jar {
+    archiveClassifier.set("")
 }
