@@ -63,25 +63,32 @@ enum class ConfigType {
 }
 
 @Retention(AnnotationRetention.RUNTIME)
-@Target(AnnotationTarget.FIELD)
-annotation class SharkConfig(val file: String, val type: ConfigType, val required: Boolean = true) {
+@Target(AnnotationTarget.FIELD, AnnotationTarget.VALUE_PARAMETER)
+annotation class SharkConfig(val file: String, val type: ConfigType) {
 
     companion object {
+
+        @Suppress("UNCHECKED_CAST")
+        fun <T> useConfig(clazz: Class<*>, path: String, type: ConfigType, default: () -> T? = { clazz.getConstructor().newInstance() as T? }): T? {
+            val file = SharkBotEnvironment.getSharkDirectory("config", path).toFile()
+            file.parentFile.mkdirs()
+            if (!file.exists()) {
+                try {
+                    default()?.also { file.createNewFile() }?.let(type::write)?.let(file::writeBytes)
+                } catch (_: Throwable) {}
+            }
+            if (file.exists()) {
+                val bytes = file.readBytes()
+                return type.read(bytes, clazz) as T?
+            }
+            return null
+        }
 
         inline fun <reified T> useConfig(
             path: String,
             type: ConfigType,
-            default: () -> T = { T::class.java.getConstructor().newInstance() }
-        ): T {
-            val file = SharkBotEnvironment.getSharkDirectory("config", path).toFile()
-            file.parentFile.mkdirs()
-            if (!file.exists()) {
-                file.createNewFile()
-                file.writeBytes(type.write(default()))
-            }
-            val bytes = file.readBytes()
-            return type.read(bytes, T::class.java)
-        }
+            noinline default: () -> T? = { T::class.java.getConstructor().newInstance() }
+        ) = useConfig(T::class.java, path, type, default)
 
     }
 
@@ -100,18 +107,8 @@ class SharkConfigBeanPostProcessor : BeanPostProcessor {
             try {
                 val annotation = declaredField.getAnnotation(SharkConfig::class.java) ?: continue
                 declaredField.isAccessible = true
-                val file = getDirectory(annotation.file).toFile()
-                file.parentFile.mkdirs()
-                if (!file.exists()) {
-                    file.createNewFile()
-                    file.writeBytes(annotation.type.default(declaredField.type))
-                }
-                val bytes = file.readBytes()
-                val value = annotation.type.read(bytes, declaredField.type)
-                declaredField.set(bean, value)
-            } catch (error: Throwable) {
-                error.printStackTrace()
-            }
+                declaredField.set(bean, SharkConfig.useConfig(declaredField.type, annotation.file, annotation.type))
+            } catch (_: Throwable) {}
         }
     }
 
