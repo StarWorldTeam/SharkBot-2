@@ -11,7 +11,7 @@ abstract class Event {
         this.cancelled = cancelled
     }
 
-    open fun getEventBus() = bus
+    open fun getEventBus() = bus!!
     open fun setEventBus(bus: EventBus) = this.also {
         it.bus = bus
     }

@@ -3,6 +3,7 @@ package shark.core.plugin
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import kotlinx.coroutines.*
 import org.springframework.beans.factory.InitializingBean
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.config.BeanDefinitionHolder
@@ -19,6 +20,8 @@ import shark.core.event.EventBus
 import shark.core.resource.ResourceLoader
 import java.io.File
 import java.net.URLClassLoader
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 
 class ClassLoaderBeanDefinitionScanner(private val classLoader: ClassLoader, private val beanFactory: DefaultListableBeanFactory) : ClassPathBeanDefinitionScanner(beanFactory) {
@@ -58,15 +61,17 @@ class SharkLanguageProvider : LanguageProvider {
         scanner.scan(*loader.definedPackages.map { it.name }.toTypedArray())
     }
 
-    override fun loadPlugin(file: File, eventBus: EventBus): Plugin? {
+    override suspend fun loadPlugin(file: File, eventBus: EventBus): Plugin? {
         val classLoader = URLClassLoader(arrayOf(file.toURI().toURL()), ClassLoader.getSystemClassLoader())
         val stream = classLoader.getResourceAsStream("META-INF/plugin.yml") ?: return null
         val info = YAMLMapper().readValue<DefaultSharkPluginInfo>(stream)
         val mainClass = classLoader.loadClass(info.getMainClass())
         if (!mainClass.isAnnotationPresent(SharkPlugin::class.java)) return null
+        val annotation = mainClass.getAnnotation(SharkPlugin::class.java)
+        if (!SharkPlugin.checkPluginName(annotation.pluginName)) return null
         scanBeans(classLoader)
         val plugin = beanFactory.getBean<Plugin>(ClassLoaderBeanDefinitionScanner.generateBeanName(mainClass.name))
-        val event = PluginLoadingEvent(plugin, this, info, file)
+        val event = PluginLoadingEvent(plugin, this, info, file, annotation.pluginName)
         plugin.pluginLoadingEvent = event
         plugin.initialize()
         plugin.getPluginLoadingEvent()
@@ -74,7 +79,17 @@ class SharkLanguageProvider : LanguageProvider {
         return plugin
     }
 
-    override fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean {
+    @Autowired
+    private lateinit var resourceLoader: ResourceLoader
+    override suspend fun loadResources(plugin: Plugin, pluginFile: File) {
+        resourceLoader.loadAssets(classLoader = plugin.javaClass.classLoader)
+    }
+
+    override suspend fun loadData(plugin: Plugin, pluginFile: File) {
+        resourceLoader.loadData(classLoader = plugin.javaClass.classLoader)
+    }
+
+    override suspend fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean {
         return plugin.isFile && plugin.endsWith(".jar")
     }
 
@@ -102,25 +117,32 @@ class PluginLoader : InitializingBean {
     private val eventBus = EventBus(this::class)
     fun getEventBus() = eventBus
 
-    override fun afterPropertiesSet() {
+    override fun afterPropertiesSet() = runBlocking {
         resourceLoader.loadAssets()
         plugins.putAll(
             pluginDirectory.listFiles()
-                .map { it.path to (provider to provider.loadPlugin(it, getEventBus())) }
+                .map {
+                    async { it.path to (provider to provider.loadPlugin(it, getEventBus())) }
+                }
+                .awaitAll()
                 .filter { it.second.second != null }
                 .map { it.first to (it.second.first to it.second.second!!) }
         )
+        val asyncJobs = mutableListOf<Job>()
         for (file in pluginDirectory.listFiles()) {
             if (file.path in plugins) continue
-            for (provider in context.getBeansOfType(LanguageProvider::class.java)) {
-                if (provider == this.provider) continue
-                if (provider.value.isPluginSupported(file, getEventBus())) {
-                    val plugin = provider.value.loadPlugin(file, getEventBus())
-                    if (plugin != null)
-                        plugins[file.path] = provider.value to plugin
+            launch {
+                for (provider in context.getBeansOfType(LanguageProvider::class.java)) {
+                    if (provider == this@PluginLoader.provider) continue
+                    if (provider.value.isPluginSupported(file, getEventBus())) {
+                        val plugin = provider.value.loadPlugin(file, getEventBus())
+                        if (plugin != null)
+                            plugins[file.path] = provider.value to plugin
+                    }
                 }
-            }
+            }.also(asyncJobs::add)
         }
+        asyncJobs.joinAll()
     }
 
 }
@@ -148,5 +170,30 @@ class DefaultSharkPluginInfo: SharkPluginInfo {
     override fun getVersion() = version
     override fun getDescription() = description
     override fun getMainClass(): String = mainClass
+
+}
+
+@Service
+class PluginLoadingContext {
+
+    @Autowired
+    private lateinit var loader: PluginLoader
+
+    suspend fun waitPlugin(name: String): Plugin = suspendCoroutine { continuation ->
+        loader.getEventBus().on<PluginLoadingEvent> {
+            if (it.getPluginId() == name)
+                continuation.resume(it.getPlugin())
+        }
+        for (plugin in loader.getPlugins()) {
+            if (plugin.value.second.getPluginLoadingEvent().getPluginId() == name)
+                continuation.resume(plugin.value.second)
+        }
+    }
+
+    suspend fun waitPlugins(vararg name: String) = coroutineScope {
+        return@coroutineScope name.map {
+            async { waitPlugin(it) }
+        }.awaitAll()
+    }
 
 }

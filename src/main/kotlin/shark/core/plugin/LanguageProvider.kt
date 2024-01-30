@@ -5,7 +5,10 @@ import java.io.File
 
 interface LanguageProvider {
 
-    fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean
-    fun loadPlugin(file: File, eventBus: EventBus): Plugin?
+    suspend fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean
+    suspend fun loadPlugin(file: File, eventBus: EventBus): Plugin?
+
+    suspend fun loadData(plugin: Plugin, pluginFile: File) {}
+    suspend fun loadResources(plugin: Plugin, pluginFile: File) {}
 
 }
