@@ -1,3 +1,10 @@
 {
-    "language.locale": "en-US"
+    "language.locale": "en-US",
+    "message.command.general.argument.invalid": "Invalid argument.",
+    "message.command.general.operation.invalid": "Invalid Operation.",
+    "command.shark.language.success": "Successfully switched to language: %2$s (%1$s).",
+    "command.shark.language.name": "language",
+    "command.shark.language.description": "Modify display language",
+    "command.shark.language.option.language.name": "language-name",
+    "command.shark.language.option.language.description": "The name of the language"
 }

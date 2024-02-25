@@ -1,8 +1,11 @@
 package shark
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import kotlinx.coroutines.runBlocking
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.getBean
 import org.springframework.boot.Banner
 import org.springframework.boot.SpringApplication
 import org.springframework.boot.SpringBootVersion
@@ -15,19 +18,22 @@ import org.springframework.boot.system.JavaVersion
 import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.core.env.Environment
 import org.springframework.data.mongodb.repository.config.EnableMongoRepositories
+import org.springframework.scheduling.annotation.EnableScheduling
 import org.springframework.stereotype.Service
-import shark.core.resource.Language
-import shark.core.resource.ResourceLoader
-import shark.core.resource.TypedResourcesLoadedEvent
+import shark.core.event.Event
+import shark.core.event.EventBus
+import shark.core.plugin.PluginLoader
+import shark.core.resource.*
 import shark.network.SharkClient
 import shark.util.ConfigType
-import shark.util.ResourceUtil
 import shark.util.SharkConfig
 import java.io.PrintStream
 import java.nio.file.Path
+import kotlin.concurrent.thread
 
 @SpringBootApplication(scanBasePackages = ["shark", "sharkbot"])
 @EnableMongoRepositories(value = ["shark", "sharkbot"])
+@EnableScheduling
 class SharkBotApplication {
 
     @Autowired
@@ -65,10 +71,13 @@ object SharkBotEnvironment {
 
 object SharkBot {
 
+    val eventBus = EventBus(SharkBot::class)
+
     val applicationConfig = SharkConfig.useConfig<SharkApplicationConfig>("shark/application.yml", ConfigType.YAML)!!
 
     val applicationBuilder: SpringApplicationBuilder = SpringApplicationBuilder(SharkBotApplication::class.java)
         .banner(SharkBanner())
+
     internal var application: SpringApplication? = null
         set(value) {
             if (field != null) throw UnsupportedOperationException()
@@ -82,7 +91,6 @@ object SharkBot {
             field = value
         }
     fun getContext() = context!!
-
 }
 
 class SharkBanner : Banner {
@@ -120,22 +128,57 @@ class SharkBanner : Banner {
 
 }
 
+class SharkApplicationStartedEvent : Event()
+
 suspend fun main(args: Array<String>) {
+    System.setProperty("shark.application.arguments", ObjectMapper().writeValueAsString(args))
     SharkBot.application = SharkBot.applicationBuilder.build()
     SharkBot.context = SharkBot.getApplication().run(*args)
-    SharkBot.getContext().getBean(ResourceLoader::class.java).apply {
-        getAssetsEventBus().on<TypedResourcesLoadedEvent> {
-            if (it.getResourceType().path == "language") {
-                for (language in it.getResources()) {
-                    val languageName = language.getFileName(false)
-                    Language.getLanguageOrPut(languageName).putAll(
-                        ResourceUtil.resolveToMap(language)
-                    )
-                }
-            }
-        }
+    SharkBot.eventBus.emit(SharkApplicationStartedEvent())
+    run {
+        val pluginLoader = SharkBot.getContext().getBean<PluginLoader>()
+        val assetsLoader = SharkBot.getContext().getBean<AssetsResourceLoader>()
+        val dataLoader = SharkBot.getContext().getBean<DataResourceLoader>()
+        assetsLoader.loadAssets()
+        for (plugin in pluginLoader.getPlugins())
+            plugin.value.first.loadAssets(
+                plugin.value.second,
+                plugin.value.second.getPluginLoadingEvent().getPluginFile()
+            )
+        assetsLoader.getEventBus().emit(AllAssetsLoadedEvent(assetsLoader))
+        dataLoader.loadData()
+        for (plugin in pluginLoader.getPlugins())
+            plugin.value.first.loadData(
+                plugin.value.second,
+                plugin.value.second.getPluginLoadingEvent().getPluginFile()
+            )
+        dataLoader.getEventBus().emit(AllDataLoadedEvent(dataLoader))
+        SharkBot.eventBus.emit(AllResourcesLoadedEvent(assetsLoader, dataLoader))
     }
-    runCatching {
-        SharkBot.getContext().getBean(SharkClient::class.java).start()
+    SharkBot.getContext().getBean<SharkBotThreads>().start()
+}
+
+@Service
+class SharkBotThreads {
+
+    private var running: Boolean = false
+
+    @Autowired private lateinit var client: SharkClient
+
+    private val threadSharkClient by lazy {
+        thread(name = "shark-client", start = false) { runBlocking { client.start() } }
     }
+    private val threadBackend by lazy {
+        thread(name = "shark-backend", start = false) {}
+    }
+
+    fun getSharkClientThread() = threadSharkClient
+    fun getBackendThread() = threadBackend
+
+    fun start() {
+        getBackendThread().start()
+        getSharkClientThread().start()
+        running = true
+    }
+
 }

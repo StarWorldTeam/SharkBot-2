@@ -3,12 +3,16 @@ package shark.core.resource
 import com.google.common.collect.HashBiMap
 import okhttp3.internal.toImmutableList
 import okhttp3.internal.toImmutableMap
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver
+import org.springframework.stereotype.Component
 import org.springframework.stereotype.Controller
 import shark.SharkBot
 import shark.core.data.registry.ResourceLocation
 import shark.core.event.Event
 import shark.core.event.EventBus
+import shark.core.event.EventSubscriber
+import shark.core.event.SubscribeEvent
 
 
 open class AnyRepository<T> {
@@ -36,40 +40,48 @@ open class ResourceRepository : AnyRepository<SharkResource>() {
 }
 
 @Controller
-class ResourceLoader {
+class AssetsResourceLoader : ResourceLoader() {
 
-    private val dataEventBus = EventBus(this::class)
-    private val assetsEventBus = EventBus(this::class)
-
-    private val assetsRepository = ResourceRepository()
-    private val dataResourceRepository = ResourceRepository()
-
-    fun getDataEventBus() = dataEventBus
-    fun getAssetsEventBus() = assetsEventBus
-    fun getAssetsRepository() = assetsRepository
-    fun getDataRepository() = dataResourceRepository
+    private val eventBus = EventBus(this::class)
+    fun getEventBus() = eventBus
 
     fun loadAssets(path: String = "", classLoader: ClassLoader = SharkBot::class.java.classLoader) {
         val map = loadAsResourceMap("$path/assets", classLoader)
         for (sharkResources in map.values) {
             for (sharkResource in sharkResources) {
-                assetsRepository += sharkResource
-                getAssetsEventBus().emit(ResourceLoadedEvent(sharkResource))
+                getRepository() += sharkResource
+                getEventBus().emit(ResourceLoadedEvent(sharkResource))
             }
         }
-        map.forEach { getAssetsEventBus().emit(TypedResourcesLoadedEvent(it.key, it.value)) }
+        map.forEach { getEventBus().emit(TypedResourcesLoadedEvent(it.key, it.value)) }
     }
+
+}
+
+@Controller
+class DataResourceLoader : ResourceLoader() {
+
+    private val eventBus = EventBus(this::class)
+    fun getEventBus() = eventBus
 
     fun loadData(path: String = "", classLoader: ClassLoader = SharkBot::class.java.classLoader) {
         val map = loadAsResourceMap("$path/data", classLoader)
         for (sharkResources in map.values) {
             for (sharkResource in sharkResources) {
-                dataResourceRepository += sharkResource
-                getDataEventBus().emit(ResourceLoadedEvent(sharkResource))
+                getRepository() += sharkResource
+                getEventBus().emit(ResourceLoadedEvent(sharkResource))
             }
         }
-        map.forEach { getDataEventBus().emit(TypedResourcesLoadedEvent(it.key, it.value)) }
+        map.forEach { getEventBus().emit(TypedResourcesLoadedEvent(it.key, it.value)) }
     }
+
+}
+
+@Controller
+class ResourceLoader {
+
+    private val repository = ResourceRepository()
+    fun getRepository() = repository
 
     fun loadAsResourceMap(path: String, classLoader: ClassLoader): Map<ResourceLocation, List<SharkResource>> {
         val resourceMap = hashMapOf<ResourceLocation, MutableList<SharkResource>>()
@@ -132,5 +144,50 @@ class TypedResourcesLoadedEvent(private val type: ResourceLocation, private val 
 
     fun getResourceType() = type
     fun getResources() = resources
+
+}
+
+class AllResourcesLoadedEvent(private vararg val loaders: ResourceLoader) : Event() {
+
+    fun getLoaders() = loaders
+
+}
+
+class AllDataLoadedEvent(private val loader: ResourceLoader) : Event() {
+
+    fun getLoader() = loader
+
+}
+
+class AllAssetsLoadedEvent(private val loader: ResourceLoader): Event() {
+
+    fun getLoader() = loader
+
+}
+
+@Component
+class ResourceMap : MutableMap<String, MutableMap<ResourceLocation, SharkResource>> by mutableMapOf()
+
+@EventSubscriber(AssetsResourceLoader::class)
+class DefaultResourceProcessor {
+
+    @Autowired
+    private lateinit var resourceMap: ResourceMap
+
+    companion object {
+        val whitelist = mutableListOf<String>().apply {
+            add("texture")
+        }
+    }
+
+    @SubscribeEvent
+    fun onSharkApplicationStarted(event: TypedResourcesLoadedEvent) {
+        if (event.getResourceType().path in whitelist) {
+            val map = resourceMap.getOrPut(event.getResourceType().path, ::mutableMapOf)
+            for (i in event.getResources()) {
+                map[i.getResourceLocation()] = i
+            }
+        }
+    }
 
 }

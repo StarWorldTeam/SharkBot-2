@@ -43,12 +43,10 @@ class ResourceLocation private constructor(val namespace: String, val path: Stri
     }
 
     override fun equals(other: Any?): Boolean {
-        return other != null && other is ResourceLocation && other.namespace == this.namespace && other.path == this.path
+        return other === this || (other != null && other is ResourceLocation && other.namespace == this.namespace && other.path == this.path)
     }
 
-    override fun hashCode(): Int {
-        return 31 * namespace.hashCode() + path.hashCode()
-    }
+    override fun hashCode() = toString().hashCode()
 
     fun <T> format(formatter: (namespace: String, path: String) -> T) = formatter(namespace, path)
     fun toLanguageKey() = "$namespace.$path"

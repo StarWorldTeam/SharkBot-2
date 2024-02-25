@@ -1,3 +1,13 @@
 {
-    "language.locale": "zh-CN"
+    "language.locale": "zh-CN",
+    "message.command.general.argument.invalid": "无效参数。",
+    "message.command.general.operation.invalid": "无效操作。",
+    "command.shark.language.success": "成功切换到语言: %2$s (%1$s)。",
+    "command.shark.language.name": "语言",
+    "command.shark.language.description": "修改显示语言",
+    "command.shark.language.option.language.name": "语言名称",
+    "command.shark.language.option.language.description": "语言的名称",
+    "command.shark.luck.name": "幸运值",
+    "command.shark.luck.description": "查看今日幸运值",
+    "command.shark.luck.value": "你的今日幸运值: %s！"
 }

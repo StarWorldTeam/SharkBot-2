@@ -1,10 +1,14 @@
 package shark.network
 
 import com.neovisionaries.ws.client.WebSocketFactory
+import dev.minn.jda.ktx.generics.getChannel
 import dev.minn.jda.ktx.jdabuilder.light
-import kodash.type.None
 import kotlinx.coroutines.runBlocking
 import net.dv8tion.jda.api.JDA
+import net.dv8tion.jda.api.entities.Guild
+import net.dv8tion.jda.api.entities.User
+import net.dv8tion.jda.api.entities.channel.Channel
+import net.dv8tion.jda.api.events.GenericEvent
 import net.dv8tion.jda.api.events.interaction.command.CommandAutoCompleteInteractionEvent
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
@@ -18,11 +22,9 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.core.MethodParameter
 import org.springframework.stereotype.Component
+import shark.core.event.Event
 import shark.core.event.EventBus
-import shark.network.command.AutoCompleteMode
-import shark.network.command.MetaCommand
-import shark.network.command.SharkCommandBeanPostProcessor
-import shark.network.command.SharkCommandOption
+import shark.network.command.*
 import shark.network.interaction.CommandInteractionEvent
 import shark.network.interaction.InteractionAutoCompleteEvent
 import shark.util.ConfigType
@@ -44,8 +46,22 @@ class SharkClientConfig {
     var token: String = ""
 }
 
+interface ISharkClient {
+
+    fun getUser(id: Long): shark.core.entity.User = shark.core.entity.User.of(id, this)
+    fun getUser(user: User): shark.core.entity.User = getUser(user.idLong)
+    fun getJDA(): JDA?
+
+    fun getGuildById(id: Long): Guild?
+    fun getChannelById(id: Long): Channel?
+    fun getUserById(id: Long): User?
+
+}
+
 @Component
-class SharkClient {
+class SharkClient : ISharkClient {
+
+    override fun getJDA() = client
 
     private val eventBus = EventBus(this::class)
     fun getEventBus() = eventBus
@@ -88,36 +104,55 @@ class SharkClient {
         val commands = mutableListOf<SlashCommandData>()
         for (metaCommand in commandBeanPostProcessor.getCommands()) {
             val command = metaCommand.getCommand()
-            command.also(metaCommand.getSharkCommand()::setup)
+            val event = CommandSetupEvent(
+                command, this
+            )
+            metaCommand.getSharkCommand().setup(event)
             val function = metaCommand.getAction().getFunction().javaMethod!!
             function.parameters.forEach {
-                if (it.isAnnotationPresent(SharkCommandOption::class.java)) {
-                    val annotation = it.getAnnotation(SharkCommandOption::class.java)
+                if (it.isAnnotationPresent(Command.Option::class.java)) {
+                    val annotation = it.getAnnotation(Command.Option::class.java)
                     if (annotation.register)
                         command.addOption(
                             annotation.type,
-                            SharkCommandOption.getName(it),
+                            Command.Option.getName(it),
                             annotation.description,
                             annotation.required,
                             annotation.autoComplete.isEnabledFor(MethodParameter.forParameter(it))
                         )
                 }
             }
+            event.getTranslation().putTranslations(event)
             commands.add(command)
         }
         action.addCommands(commands)
     }
+
+    override fun getChannelById(id: Long) = getClient().getChannel(id)
+    override fun getGuildById(id: Long) = getClient().getGuildById(id)
+    override fun getUserById(id: Long) = getClient().getUserById(id)
+
+}
+
+class JDAGenericEvent(private val genericEvent: GenericEvent) : Event() {
+
+    fun getGenericEvent() = genericEvent
 
 }
 
 @Component
 class SharkClientEventListener : ListenerAdapter() {
 
+    override fun onGenericEvent(event: GenericEvent) {
+        client.getEventBus().emit(JDAGenericEvent(event))
+    }
+
     @Autowired
     private lateinit var client: SharkClient
 
     override fun onSlashCommandInteraction(event: SlashCommandInteractionEvent): Unit = runBlocking {
-        val result = MetaCommand[event.name].getAction().run(event)
+        val commandEvent = shark.network.command.CommandInteractionEvent(event, client)
+        val result = MetaCommand[event.name].getAction().run(commandEvent)
         client.getEventBus().emit(CommandInteractionEvent(event, result))
     }
 
@@ -127,15 +162,15 @@ class SharkClientEventListener : ListenerAdapter() {
         val metaCommand = MetaCommand[event.name]
         val function = metaCommand.getAction().getFunction().javaMethod!!
         val firstOrNull = function.parameters.firstOrNull {
-            it.isAnnotationPresent(SharkCommandOption::class.java) && it.getAnnotation(SharkCommandOption::class.java).autoComplete == AutoCompleteMode.DEFAULT
+            Command.Option.getName(it) == event.focusedOption.name && it.isAnnotationPresent(Command.Option::class.java) && it.getAnnotation(Command.Option::class.java).autoComplete == AutoCompleteMode.DEFAULT
         }?.let { parameter ->
-            val annotation = parameter.getAnnotation(SharkCommandOption::class.java)
+            val annotation = parameter.getAnnotation(Command.Option::class.java)
+            if (event.focusedOption.name != Command.Option.getName(parameter)) return@let
             if (annotation.autoComplete.isEnabledFor(MethodParameter.forParameter(parameter))) {
                 event.replyChoiceStrings(
                     *(parameter.type.enumConstants as Array<Enum<*>>).map { it.name }.filter { it.lowercase().trim().contains(focusedValue.trim().lowercase()) }.take(25).toTypedArray()
                 ).queue()
             }
-            None
         }
         if (firstOrNull != null) return
         val autoCompleteEvent = InteractionAutoCompleteEvent(event)

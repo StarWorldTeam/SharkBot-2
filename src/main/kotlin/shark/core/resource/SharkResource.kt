@@ -10,9 +10,9 @@ abstract class SharkResource {
     abstract fun getResourceType(): ResourceLocation
     abstract fun getResourcePath(): String
 
-    open fun getFileName(suffix: Boolean = true) = getResourcePath().split("\\").joinToString("/").split("/").last().let {
-        if (suffix) it
-        else it.split(".").first()
+    open fun getFileName(extension: Boolean = true) = getResourcePath().split("\\").joinToString("/").split("/").last().let {
+        if (extension) it
+        else it.split(".").let { split -> if (split.size <= 1) split else split.subList(0, split.size - 1) }.joinToString(".")
     }
 
     abstract fun stream(): InputStream

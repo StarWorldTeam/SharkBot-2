@@ -56,7 +56,7 @@ dependencies {
     implementation("net.dv8tion:JDA:5.0.0-beta.20")
     implementation("club.minnced:jda-ktx:0.11.0-beta.20")
     implementation("org.jsoup:jsoup:1.15.4")
-    implementation("com.github.StarWorldTeam:Kodash:e59f24f863")
+    implementation("com.github.StarWorldTeam:Kodash:967068cc6b")
     implementation("com.microsoft.playwright:playwright:1.41.0")
 }
 

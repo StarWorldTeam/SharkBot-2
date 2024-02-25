@@ -16,7 +16,10 @@ import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.stereotype.Component
 import org.springframework.stereotype.Service
 import shark.SharkBotEnvironment
+import shark.core.event.Event
 import shark.core.event.EventBus
+import shark.core.resource.AssetsResourceLoader
+import shark.core.resource.DataResourceLoader
 import shark.core.resource.ResourceLoader
 import java.io.File
 import java.net.URLClassLoader
@@ -24,7 +27,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 
-class ClassLoaderBeanDefinitionScanner(private val classLoader: ClassLoader, private val beanFactory: DefaultListableBeanFactory) : ClassPathBeanDefinitionScanner(beanFactory) {
+class PluginClassLoaderBeanDefinitionScanner(private val classLoader: ClassLoader, private val beanFactory: DefaultListableBeanFactory) : ClassPathBeanDefinitionScanner(beanFactory) {
 
     companion object {
         fun generateBeanName(className: String) = "shark.plugin.bean.${className}"
@@ -57,7 +60,7 @@ class SharkLanguageProvider : LanguageProvider {
     private lateinit var beanFactory: DefaultListableBeanFactory
 
     fun scanBeans(loader: ClassLoader) {
-        val scanner = ClassLoaderBeanDefinitionScanner(loader, beanFactory)
+        val scanner = PluginClassLoaderBeanDefinitionScanner(loader, beanFactory)
         scanner.scan(*loader.definedPackages.map { it.name }.toTypedArray())
     }
 
@@ -70,33 +73,51 @@ class SharkLanguageProvider : LanguageProvider {
         val annotation = mainClass.getAnnotation(SharkPlugin::class.java)
         if (!SharkPlugin.checkPluginName(annotation.pluginName)) return null
         scanBeans(classLoader)
-        val plugin = beanFactory.getBean<Plugin>(ClassLoaderBeanDefinitionScanner.generateBeanName(mainClass.name))
+        val plugin = beanFactory.getBean<Plugin>(PluginClassLoaderBeanDefinitionScanner.generateBeanName(mainClass.name))
         val event = PluginLoadingEvent(plugin, this, info, file, annotation.pluginName)
         plugin.pluginLoadingEvent = event
-        plugin.initialize()
-        plugin.getPluginLoadingEvent()
         eventBus.emit(event)
         return plugin
     }
 
-    @Autowired
-    private lateinit var resourceLoader: ResourceLoader
-    override suspend fun loadResources(plugin: Plugin, pluginFile: File) {
-        resourceLoader.loadAssets(classLoader = plugin.javaClass.classLoader)
+    override suspend fun initializePlugin(plugin: Plugin, pluginFile: File, eventBus: EventBus) {
+        plugin.initialize()
+        plugin.getPluginLoadingEvent().setInitialized(true)
+        eventBus.emit(PluginInitializedEvent(plugin))
     }
 
+    @Autowired
+    private lateinit var assetsLoader: AssetsResourceLoader
+    override suspend fun loadAssets(plugin: Plugin, pluginFile: File) {
+        assetsLoader.loadAssets(classLoader = plugin.javaClass.classLoader)
+    }
+
+    @Autowired
+    private lateinit var dataLoader: DataResourceLoader
     override suspend fun loadData(plugin: Plugin, pluginFile: File) {
-        resourceLoader.loadData(classLoader = plugin.javaClass.classLoader)
+        dataLoader.loadData(classLoader = plugin.javaClass.classLoader)
     }
 
     override suspend fun isPluginSupported(plugin: File, eventBus: EventBus): Boolean {
-        return plugin.isFile && plugin.endsWith(".jar")
+        return plugin.isFile && plugin.name.endsWith(".jar")
     }
 
+    override suspend fun disposePlugin(plugin: Plugin, pluginFile: File) = plugin.dispose()
+
+}
+
+enum class PluginLoaderState {
+    IDLE, CONSTRUCTING, INITIALIZING, FINISHED;
 }
 
 @Component
 class PluginLoader : InitializingBean {
+
+    private var state = PluginLoaderState.IDLE
+    fun getState() = state
+
+    @Autowired
+    private lateinit var pluginLoadingContext: PluginLoadingContext
 
     @Autowired
     private lateinit var resourceLoader: ResourceLoader
@@ -117,33 +138,71 @@ class PluginLoader : InitializingBean {
     private val eventBus = EventBus(this::class)
     fun getEventBus() = eventBus
 
-    override fun afterPropertiesSet() = runBlocking {
-        resourceLoader.loadAssets()
-        plugins.putAll(
-            pluginDirectory.listFiles()
-                .map {
-                    async { it.path to (provider to provider.loadPlugin(it, getEventBus())) }
-                }
-                .awaitAll()
-                .filter { it.second.second != null }
-                .map { it.first to (it.second.first to it.second.second!!) }
-        )
-        val asyncJobs = mutableListOf<Job>()
-        for (file in pluginDirectory.listFiles()) {
-            if (file.path in plugins) continue
-            launch {
-                for (provider in context.getBeansOfType(LanguageProvider::class.java)) {
-                    if (provider == this@PluginLoader.provider) continue
-                    if (provider.value.isPluginSupported(file, getEventBus())) {
-                        val plugin = provider.value.loadPlugin(file, getEventBus())
-                        if (plugin != null)
-                            plugins[file.path] = provider.value to plugin
+    override fun afterPropertiesSet(): Unit = loadPlugins()
+
+    fun loadPlugins() = runBlocking {
+        state = PluginLoaderState.CONSTRUCTING
+        pluginLoadingContext.loader = this@PluginLoader
+        pluginDirectory.listFiles()!!
+            .filter { provider.isPluginSupported(it, getEventBus()) }
+            .map { file ->
+                launch {
+                    provider.loadPlugin(file, getEventBus())?.let {
+                        file.path to (provider to it)
+                    }?.let {
+                        plugins[it.first] = it.second
                     }
                 }
-            }.also(asyncJobs::add)
+            }
+            .joinAll()
+        val asyncJobs = mutableListOf<Deferred<Unit>>()
+        for (file in pluginDirectory.listFiles()!!) {
+            if (file.path in plugins) continue
+            asyncJobs.add(
+                async {
+                    for (provider in context.getBeansOfType(LanguageProvider::class.java)) {
+                        if (provider == this@PluginLoader.provider) continue
+                        if (provider.value.isPluginSupported(file, getEventBus())) {
+                            val plugin = provider.value.loadPlugin(file, getEventBus())
+                            if (plugin != null) {
+                                plugins[file.path] = provider.value to plugin
+                                break
+                            }
+                        }
+                    }
+                }
+            )
         }
-        asyncJobs.joinAll()
+        asyncJobs.awaitAll()
+        state = PluginLoaderState.INITIALIZING
+        initialize()
+        state = PluginLoaderState.FINISHED
     }
+
+    suspend fun initialize(): Unit = runBlocking {
+        plugins.map {
+            async {
+                it.value.first.initializePlugin(it.value.second, it.value.second.getPluginLoadingEvent().getPluginFile(), getEventBus())
+            }
+        }.awaitAll()
+    }
+
+    suspend fun dispose(): Unit = runBlocking {
+        plugins.map {
+            async {
+                it.value.first.disposePlugin(
+                    it.value.second,
+                    it.value.second.getPluginLoadingEvent().getPluginFile()
+                )
+            }
+        }.awaitAll()
+    }
+
+}
+
+class PluginInitializedEvent(private val plugin: Plugin) : Event() {
+
+    fun getPlugin() = plugin
 
 }
 
@@ -176,15 +235,16 @@ class DefaultSharkPluginInfo: SharkPluginInfo {
 @Service
 class PluginLoadingContext {
 
-    @Autowired
-    private lateinit var loader: PluginLoader
+    internal lateinit var loader: PluginLoader
+    fun getPluginLoader() = loader
 
     suspend fun waitPlugin(name: String): Plugin = suspendCoroutine { continuation ->
-        loader.getEventBus().on<PluginLoadingEvent> {
-            if (it.getPluginId() == name)
+        loader.getEventBus().on<PluginInitializedEvent> {
+            if (it.getPlugin().getPluginLoadingEvent().getPluginId() == name)
                 continuation.resume(it.getPlugin())
         }
         for (plugin in loader.getPlugins()) {
+            if (!plugin.value.second.getPluginLoadingEvent().isInitialized()) continue
             if (plugin.value.second.getPluginLoadingEvent().getPluginId() == name)
                 continuation.resume(plugin.value.second)
         }
